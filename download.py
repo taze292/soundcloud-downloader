@@ -1,6 +1,8 @@
 import argparse
 import os
 import re
+import shutil
+import subprocess
 import sys
 
 import yt_dlp
@@ -96,6 +98,7 @@ class Downloader:
     def __init__(self, urls=None, path=DEFAULT_PATH):
         self.urls = []
         self.path = path
+        self.format = "wav"
         for u in urls or []:
             self.add_url(u)
 
@@ -115,19 +118,83 @@ class Downloader:
     def resolve_path(self):
         os.makedirs(self.path, exist_ok=True)
 
-    def download(self, url):
+    def _supports_cover(self):
+        return self.format not in ("wav",)
+
+    def _build_opts(self, outtmpl, noplaylist=True):
         opts = {
-            "outtmpl": f"{self.path}/%(title)s.%(ext)s",
+            "outtmpl": outtmpl,
             "format": "bestaudio/best",
-            "noplaylist": True,
-            "postprocessors": [
+            "noplaylist": noplaylist,
+        }
+        pps = []
+        if self.format != "best":
+            pps.append(
                 {
                     "key": "FFmpegExtractAudio",
-                    "preferredcodec": "wav",
+                    "preferredcodec": self.format,
                     "preferredquality": "0",
                 }
-            ],
-        }
+            )
+        if self._supports_cover():
+            opts["writethumbnail"] = True
+            pps.append({"key": "EmbedThumbnail"})
+        pps.append({"key": "FFmpegMetadata", "add_metadata": True})
+        opts["postprocessors"] = pps
+        return opts
+
+    def _find_audio(self, base_dir, title, exts):
+        if not title:
+            return None
+        prefix = yt_dlp.utils.sanitize_filename(title) + "."
+        try:
+            names = os.listdir(base_dir)
+        except OSError:
+            return None
+        for name in names:
+            if name.startswith(prefix):
+                ext = os.path.splitext(name)[1][1:].lower()
+                if ext in exts and "tagtmp" not in name:
+                    return os.path.join(base_dir, name)
+        return None
+
+    def _remove_album_thumb(self, album_title, target_dir=None):
+        if not album_title:
+            return
+        base = target_dir or self.path
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            try:
+                p = os.path.join(base, album_title + ext)
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
+    def _tag_file(self, filepath, album=None, track=None):
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return
+        args = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-i", filepath, "-map_metadata", "0", "-c", "copy",
+        ]
+        if album:
+            args += ["-metadata", f"album={album}"]
+        if track:
+            args += ["-metadata", f"track={track}"]
+        base, ext = os.path.splitext(filepath)
+        tmp = base + ".tagtmp" + ext
+        try:
+            subprocess.run([*args, tmp], check=True, capture_output=True)
+            os.replace(tmp, filepath)
+        except (subprocess.CalledProcessError, OSError):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def download(self, url):
+        opts = self._build_opts(f"{self.path}/%(title)s.%(ext)s")
         print(f"\n  Downloading: {url}")
         with yt_dlp.YoutubeDL(opts) as ydl:
             try:
@@ -145,18 +212,7 @@ class Downloader:
             outtmpl = f"{target_dir}/%(title)s.%(ext)s"
         else:
             outtmpl = f"{self.path}/%(playlist_title)s/%(title)s.%(ext)s"
-        opts = {
-            "outtmpl": outtmpl,
-            "format": "bestaudio/best",
-            "noplaylist": False,
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "wav",
-                    "preferredquality": "0",
-                }
-            ],
-        }
+        opts = self._build_opts(outtmpl, noplaylist=False)
         if items:
             opts["playlist_items"] = items
         if target_dir:
@@ -165,8 +221,26 @@ class Downloader:
         with yt_dlp.YoutubeDL(opts) as ydl:
             try:
                 info = ydl.extract_info(url, download=True)
-                title = info.get("title") or info.get("playlist_title") or "album"
                 entries = info.get("entries")
+                if entries:
+                    album_title = info.get("playlist_title") or info.get("title")
+                    audio_exts = (self.format
+                                  if self.format != "best"
+                                  else {"m4a", "opus", "mp3", "aac", "flac",
+                                        "ogg", "wav"})
+                    if isinstance(audio_exts, str):
+                        audio_exts = {audio_exts}
+                    base_dir = target_dir or os.path.join(
+                        self.path, album_title or "")
+                    for i, entry in enumerate(entries, start=1):
+                        fp = entry.get("filepath") or self._find_audio(
+                            base_dir, entry.get("title"), audio_exts)
+                        if fp and os.path.exists(fp):
+                            self._tag_file(
+                                fp, album=album_title,
+                                track=entry.get("playlist_index") or i)
+                    self._remove_album_thumb(album_title, target_dir)
+                title = info.get("title") or info.get("playlist_title") or "album"
                 n = len(entries) if entries else (1 if info.get("title") else 0)
                 print(f"  {C_GREEN}OK:{C_RESET} {title} ({n} track(s))")
                 return True
@@ -178,13 +252,15 @@ class Downloader:
 
 
 class App:
-    def __init__(self, urls=None, path=DEFAULT_PATH):
+    def __init__(self, urls=None, path=DEFAULT_PATH, format="wav"):
         self.dl = Downloader(urls=urls, path=path)
+        self.dl.format = format
         self.items = [
             ("Add URL(s)", self.add_urls),
             ("Loaded URLs", self.view_urls),
             ("Remove URL(s)", self.remove_urls),
             ("Set download path", self.set_path),
+            ("Set output format", self.set_format_menu),
             ("Download Album", self.download_album_menu),
             ("Download all", self.download_all),
             ("Exit", self.exit_app),
@@ -195,7 +271,8 @@ class App:
             f"{C_CYAN}{C_BOLD}  SoundCloud Downloader{C_RESET}",
             "  ----------------------------------------",
             f"  {C_YELLOW}URLs loaded:{C_RESET} {len(self.dl.urls)}    "
-            f"{C_YELLOW}Download path:{C_RESET} {self.dl.path}",
+            f"{C_YELLOW}Download path:{C_RESET} {self.dl.path}    "
+            f"{C_YELLOW}Format:{C_RESET} {self.dl.format}",
         ]
 
     def render_menu(self, idx):
@@ -347,6 +424,28 @@ class App:
             print(f"\n  {C_DIM}Keeping current path.{C_RESET}")
         wait_enter()
 
+    def set_format_menu(self):
+        print("  Output formats:")
+        print("    wav    uncompressed PCM (no cover art, text tags only)")
+        print("    mp3    320 kbps MP3 (tags + cover art)")
+        print("    flac   lossless FLAC (tags + cover art)")
+        print("    m4a    AAC in M4A container (tags + cover art)")
+        print("    opus   Opus in OGG container (tags + cover art)")
+        print("    best   keep SoundCloud's original file (tags + cover art)\n")
+        try:
+            choice = input(f"  Output format [{self.dl.format}] > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not choice:
+            print(f"\n  {C_DIM}Keeping current format.{C_RESET}")
+        elif choice in ("wav", "mp3", "flac", "m4a", "opus", "best"):
+            self.dl.format = choice
+            print(f"\n  {C_GREEN}Output format set to: {choice}{C_RESET}")
+        else:
+            print(f"\n  {C_YELLOW}Unknown format '{choice}' (use wav/mp3/flac/m4a/opus/best).{C_RESET}")
+        wait_enter()
+
     def download_album_menu(self):
         try:
             url = input("  SoundCloud album/set URL > ").strip()
@@ -401,6 +500,13 @@ def main():
         help=f"Download folder (default: '{DEFAULT_PATH}')",
     )
     parser.add_argument(
+        "--format", choices=("wav", "mp3", "flac", "m4a", "opus", "best"),
+        default="wav",
+        help="Output format (default: wav). wav has no cover art; "
+             "mp3/flac/m4a/opus include album art + tags. 'best' keeps "
+             "SoundCloud's original file.",
+    )
+    parser.add_argument(
         "--auto", action="store_true",
         help="Download all given URLs and exit (no interactive menu)",
     )
@@ -420,11 +526,11 @@ def main():
 
     enable_vt()
     if args.album:
-        app = App(path=args.path)
+        app = App(path=args.path, format=args.format)
         app.dl.download_album(args.album, target_dir=args.album_path,
                               items=args.album_items)
         return
-    app = App(urls=args.urls, path=args.path)
+    app = App(urls=args.urls, path=args.path, format=args.format)
     if args.auto:
         app.dl.resolve_path()
         for url in app.dl.urls:
