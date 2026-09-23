@@ -1,6 +1,6 @@
 # SoundCloud Downloader
 
-Downloads a SoundCloud track from a URL in the highest available quality, converting to WAV when possible (falls back to the original format if conversion is unavailable).
+Interactive CLI that downloads SoundCloud tracks in the highest available quality, converting to `.wav` when ffmpeg is available (falls back to the original format otherwise).
 
 Requires [ffmpeg](https://ffmpeg.org/) on your PATH to produce `.wav` files.
 
@@ -8,18 +8,43 @@ Requires [ffmpeg](https://ffmpeg.org/) on your PATH to produce `.wav` files.
 
 ```
 pip install -r requirements.txt
-python download.py https://soundcloud.com/artist/track
+python download.py
 ```
 
-You can also pass multiple URLs at once:
+Run with no arguments to open the interactive menu:
 
 ```
-python download.py <url1> <url2> ...
+  SoundCloud Downloader
+  ----------------------------------------
+  URLs loaded: 0    Download path: downloads
+
+    1) Add URL(s)
+    2) Loaded URLs
+    3) Remove URL(s)
+    4) Set download path
+    5) Download all
+    6) Exit
+
+  [up/down] or [1-6] navigate   [Enter] select   [Esc] quit
 ```
 
-With no URL argument, the script asks for one interactively.
+- **Add URL(s)** — paste any number of SoundCloud links (one per line; enter a blank line to finish). Duplicates are skipped.
+- **Loaded URLs** — browse the queue with the arrow keys. Press `Enter` on a track to download just that one, or `R` to remove the highlighted entry.
+- **Remove URL(s)** — remove several at once using indices like `1,3`, ranges like `2-4`, or `all`.
+- **Set download path** — change where files are saved (default `downloads/`, created automatically).
+- **Download all** — downloads every loaded URL in order.
 
-Downloads are saved to the `downloads/` folder.
+You can also pre-load URLs and options from the command line:
+
+```
+python download.py <url1> <url2> ... --path "C:/music"
+```
+
+And for scripting/non-interactive use:
+
+```
+python download.py <url1> <url2> --path "C:/music" --auto
+```
 
 ## Note on quality
 
