@@ -117,7 +117,7 @@ class Downloader:
 
     def download(self, url):
         opts = {
-            "outtmpl": f"{self.path}/%(title)s [%(id)s].%(ext)s",
+            "outtmpl": f"{self.path}/%(title)s.%(ext)s",
             "format": "bestaudio/best",
             "noplaylist": True,
             "postprocessors": [
@@ -140,6 +140,42 @@ class Downloader:
                 print(f"  {C_RED}FAILED:{C_RESET} {err}")
                 return False
 
+    def download_album(self, url, target_dir=None, items=None):
+        if target_dir:
+            outtmpl = f"{target_dir}/%(title)s.%(ext)s"
+        else:
+            outtmpl = f"{self.path}/%(playlist_title)s/%(title)s.%(ext)s"
+        opts = {
+            "outtmpl": outtmpl,
+            "format": "bestaudio/best",
+            "noplaylist": False,
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "wav",
+                    "preferredquality": "0",
+                }
+            ],
+        }
+        if items:
+            opts["playlist_items"] = items
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+        print(f"\n  Downloading album: {url}")
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            try:
+                info = ydl.extract_info(url, download=True)
+                title = info.get("title") or info.get("playlist_title") or "album"
+                entries = info.get("entries")
+                n = len(entries) if entries else (1 if info.get("title") else 0)
+                print(f"  {C_GREEN}OK:{C_RESET} {title} ({n} track(s))")
+                return True
+            except (yt_dlp.utils.DownloadError,
+                    yt_dlp.utils.ExtractorError,
+                    yt_dlp.utils.PostProcessingError) as err:
+                print(f"  {C_RED}FAILED:{C_RESET} {err}")
+                return False
+
 
 class App:
     def __init__(self, urls=None, path=DEFAULT_PATH):
@@ -149,6 +185,7 @@ class App:
             ("Loaded URLs", self.view_urls),
             ("Remove URL(s)", self.remove_urls),
             ("Set download path", self.set_path),
+            ("Download Album", self.download_album_menu),
             ("Download all", self.download_all),
             ("Exit", self.exit_app),
         ]
@@ -171,7 +208,7 @@ class App:
                 lines.append(f"   {i + 1}) {label}")
         lines.append("")
         lines.append(
-            f"{C_DIM}  [up/down] or [1-6] navigate   [Enter] select   "
+            f"{C_DIM}  [up/down] or [1-{len(self.items)}] navigate   [Enter] select   "
             f"[Esc] quit{C_RESET}"
         )
         return "\n".join(lines) + "\n"
@@ -310,6 +347,24 @@ class App:
             print(f"\n  {C_DIM}Keeping current path.{C_RESET}")
         wait_enter()
 
+    def download_album_menu(self):
+        try:
+            url = input("  SoundCloud album/set URL > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not url:
+            print(f"\n  {C_YELLOW}No URL entered.{C_RESET}")
+            wait_enter()
+            return
+        try:
+            tgt = input("  Download directory (blank = downloads/<album name>) > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        self.dl.download_album(url, target_dir=tgt or None)
+        wait_enter()
+
     def download_all(self):
         if not self.dl.urls:
             print(f"  {C_YELLOW}No URLs loaded yet.{C_RESET}")
@@ -349,9 +404,26 @@ def main():
         "--auto", action="store_true",
         help="Download all given URLs and exit (no interactive menu)",
     )
+    parser.add_argument(
+        "--album", metavar="URL",
+        help="Download a SoundCloud album/set directly (no interactive menu)",
+    )
+    parser.add_argument(
+        "--album-path", metavar="DIR",
+        help="Folder for the album download (default: <download path>/<album name>)",
+    )
+    parser.add_argument(
+        "--album-items", metavar="ITEMS",
+        help="Restrict album tracks, e.g. '1-3' or '1,4' (default: all)",
+    )
     args = parser.parse_args()
 
     enable_vt()
+    if args.album:
+        app = App(path=args.path)
+        app.dl.download_album(args.album, target_dir=args.album_path,
+                              items=args.album_items)
+        return
     app = App(urls=args.urls, path=args.path)
     if args.auto:
         app.dl.resolve_path()
